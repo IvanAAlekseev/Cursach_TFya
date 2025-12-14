@@ -2,6 +2,6 @@
   % a, b;
   a as 10;
   b as a + 5;
-  write(b);@
+  write(b);
   if a > 5 then write(1) else write(0);
 }

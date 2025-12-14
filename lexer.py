@@ -523,7 +523,217 @@ class Lexer:
         for op, t1, t2, res in ops:
             print(f"{op:<10} {t1:<10} {t2:<10} {res:<10}")
 
+# -----------------------------------------------------------
+# СИНТАКСИЧЕСКИЙ АНАЛИЗАТОР (рекурсивный спуск, вариант 1)
+# -----------------------------------------------------------
 
+class SyntaxError(Exception):
+    def __init__(self, message: str, line: int, col: int):
+        self.message = message
+        self.line = line
+        self.col = col
+        super().__init__(f"Syntax error at {line}:{col}: {message}")
+
+class SyntaxAnalyzer:
+    def __init__(self, tokens: list):
+        self.tokens = tokens
+        self.pos = 0
+        self.current_token = self.tokens[0] if tokens else Token(TokenType.EOF, '', 0, 0)
+
+    def advance(self):
+        """Переход к следующему токену"""
+        self.pos += 1
+        if self.pos < len(self.tokens):
+            self.current_token = self.tokens[self.pos]
+        else:
+            self.current_token = Token(TokenType.EOF, '', 0, 0)
+
+    def expect(self, token_type: TokenType, value: str = None, msg: str = "Unexpected token"):
+        """Проверка и продвижение"""
+        if self.current_token.type != token_type:
+            raise SyntaxError(msg, self.current_token.line, self.current_token.col)
+        if value is not None and self.current_token.value != value:
+            raise SyntaxError(f"Expected '{value}'", self.current_token.line, self.current_token.col)
+        self.advance()
+
+    def is_keyword(self, kw: str) -> bool:
+        return self.current_token.type == TokenType.KEYWORD and self.current_token.value == kw
+
+    def is_delim(self, d: str) -> bool:
+        return self.current_token.type == TokenType.DELIMITER and self.current_token.value == d
+
+    def is_identifier(self) -> bool:
+        return self.current_token.type == TokenType.IDENTIFIER
+
+    def is_number(self) -> bool:
+        return self.current_token.type == TokenType.NUMBER
+
+    def is_relation_op(self) -> bool:
+        return self.current_token.type == TokenType.DELIMITER and self.current_token.value in ('<', '<=', '>', '>=', '=', '<>')
+
+    def is_add_op(self) -> bool:
+        return (self.current_token.type == TokenType.DELIMITER and self.current_token.value in ('+', '-')) or \
+               (self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'or')
+
+    def is_mult_op(self) -> bool:
+        return (self.current_token.type == TokenType.DELIMITER and self.current_token.value in ('*', '/')) or \
+               (self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'and')
+
+    # ------------------- Правила грамматики -------------------
+
+    def parse_program(self):
+        self.expect(TokenType.DELIMITER, '{')
+        self.parse_body()
+        self.expect(TokenType.DELIMITER, '}', "Expected '}' at end of program")
+
+    def parse_body(self):
+        # Первый элемент: описание или оператор
+        if self._is_description_start() or self._is_operator_start():
+            self.parse_statement()
+            # Далее — ноль или более: ; (описание | оператор)
+            while self.is_delim(';'):
+                self.advance()
+                if self._is_description_start() or self._is_operator_start():
+                    self.parse_statement()
+                else:
+                    break  # допускаем завершение без trailing ;
+
+    def _is_description_start(self) -> bool:
+        return self.current_token.type == TokenType.DELIMITER and self.current_token.value in ('%', '#', '$')
+
+    def _is_operator_start(self) -> bool:
+        return (self.is_identifier() or
+                self.is_keyword('if') or
+                self.is_keyword('while') or
+                self.is_keyword('for') or
+                self.is_keyword('read') or
+                self.is_keyword('write') or
+                self.is_delim('['))
+
+    def parse_statement(self):
+        if self._is_description_start():
+            self.parse_description()
+        elif self._is_operator_start():
+            self.parse_operator()
+        else:
+            raise SyntaxError("Expected declaration or operator", self.current_token.line, self.current_token.col)
+
+    def parse_description(self):
+        # <тип>
+        if not self._is_description_start():
+            raise SyntaxError("Expected type (%/#/$)", self.current_token.line, self.current_token.col)
+        self.advance()  # пропускаем тип
+        self.parse_id_list()
+
+    def parse_id_list(self):
+        self.expect(TokenType.IDENTIFIER, None, "Expected identifier")
+        while self.is_delim(','):
+            self.advance()
+            self.expect(TokenType.IDENTIFIER, None, "Expected identifier after ','")
+
+    def parse_operator(self):
+        if self.is_delim('['):
+            self.parse_compound()
+        elif self.is_keyword('if'):
+            self.parse_if()
+        elif self.is_keyword('while'):
+            self.parse_while()
+        elif self.is_keyword('for'):
+            self.parse_for()
+        elif self.is_keyword('read'):
+            self.parse_read()
+        elif self.is_keyword('write'):
+            self.parse_write()
+        elif self.is_identifier():
+            self.parse_assignment()
+        else:
+            raise SyntaxError("Unknown operator", self.current_token.line, self.current_token.col)
+
+    def parse_compound(self):
+        self.expect(TokenType.DELIMITER, '[')
+        self.parse_operator()
+        while self.is_delim(':'):
+            self.advance()
+            self.parse_operator()
+        self.expect(TokenType.DELIMITER, ']')
+
+    def parse_assignment(self):
+        self.expect(TokenType.IDENTIFIER)
+        self.expect(TokenType.KEYWORD, 'as')
+        self.parse_expression()
+
+    def parse_if(self):
+        self.expect(TokenType.KEYWORD, 'if')
+        self.parse_expression()
+        self.expect(TokenType.KEYWORD, 'then')
+        self.parse_operator()
+        if self.is_keyword('else'):
+            self.advance()
+            self.parse_operator()
+
+    def parse_while(self):
+        self.expect(TokenType.KEYWORD, 'while')
+        self.parse_expression()
+        self.expect(TokenType.KEYWORD, 'do')
+        self.parse_operator()
+
+    def parse_for(self):
+        self.expect(TokenType.KEYWORD, 'for')
+        self.parse_assignment()  # <присваивания>
+        self.expect(TokenType.KEYWORD, 'to')
+        self.parse_expression()
+        self.expect(TokenType.KEYWORD, 'do')
+        self.parse_operator()
+
+    def parse_read(self):
+        self.expect(TokenType.KEYWORD, 'read')
+        self.expect(TokenType.DELIMITER, '(')
+        self.parse_id_list()
+        self.expect(TokenType.DELIMITER, ')')
+
+    def parse_write(self):
+        self.expect(TokenType.KEYWORD, 'write')
+        self.expect(TokenType.DELIMITER, '(')
+        self.parse_expression()
+        while self.is_delim(','):
+            self.advance()
+            self.parse_expression()
+        self.expect(TokenType.DELIMITER, ')')
+
+    def parse_expression(self):
+        self.parse_sum()
+        if self.is_relation_op():
+            self.advance()
+            self.parse_sum()
+
+    def parse_sum(self):
+        self.parse_product()
+        while self.is_add_op():
+            self.advance()
+            self.parse_product()
+
+    def parse_product(self):
+        self.parse_factor()
+        while self.is_mult_op():
+            self.advance()
+            self.parse_factor()
+
+    def parse_factor(self):
+        if self.is_identifier():
+            self.advance()
+        elif self.is_number():
+            self.advance()
+        elif self.current_token.value in ('true', 'false'):
+            self.advance()
+        elif self.is_keyword('not'):
+            self.advance()
+            self.parse_factor()
+        elif self.is_delim('('):
+            self.advance()
+            self.parse_expression()
+            self.expect(TokenType.DELIMITER, ')')
+        else:
+            raise SyntaxError("Expected factor (identifier, number, true/false, not, or '(')", self.current_token.line, self.current_token.col)
 def main():
     if len(sys.argv) < 2:
         print("Usage: python lexer.py <input_file>")
@@ -535,6 +745,14 @@ def main():
     lexer.print_tables()
     lexer.print_operation_table()
 
+    # === СИНТАКСИЧЕСКИЙ АНАЛИЗ ===
+    try:
+        parser = SyntaxAnalyzer(lexer.tokens)
+        parser.parse_program()
+        print("\n Синтаксический анализ успешно завершён!")
+    except SyntaxError as e:
+        print(f"\n СИНТАКТИЧЕСКАЯ ОШИБКА: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
