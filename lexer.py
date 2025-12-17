@@ -534,12 +534,20 @@ class SyntaxError(Exception):
         self.col = col
         super().__init__(f"Syntax error at {line}:{col}: {message}")
 
+class SemanticError(Exception):
+    def __init__(self, message: str, line: int, col: int):
+        self.message = message
+        self.line = line
+        self.col = col
+        super().__init__(f"Семантическая ошибка в {line}:{col}: {message}")
+
 class SyntaxAnalyzer:
-    def __init__(self, tokens: list):
+    def __init__(self, tokens: list, identifiers: Dict[str, int]):
         self.tokens = tokens
         self.pos = 0
         self.current_token = self.tokens[0] if tokens else Token(TokenType.EOF, '', 0, 0)
-
+        self.declared_vars: Dict[str, bool] = {}  # имя → описано (True)
+        self._last_id_list: List[str] = []  # чтобы передавать имена из parse_id_list
     def advance(self):
         """Переход к следующему токену"""
         self.pos += 1
@@ -619,16 +627,24 @@ class SyntaxAnalyzer:
             raise SyntaxError("Expected declaration or operator", self.current_token.line, self.current_token.col)
 
     def parse_description(self):
-        # <тип>
         if not self._is_description_start():
             raise SyntaxError("Expected type (%/#/$)", self.current_token.line, self.current_token.col)
         self.advance()  # пропускаем тип
         self.parse_id_list()
+        # Семантика: запоминаем, что эти переменные описаны
+        for name in self._last_id_list:
+            if name in self.declared_vars:
+                raise SemanticError(f"Повторное описание переменной '{name}'", self.current_token.line,
+                                    self.current_token.col)
+            self.declared_vars[name] = True
 
     def parse_id_list(self):
+        self._last_id_list = []  # очищаем список
+        self._last_id_list.append(self.current_token.value)
         self.expect(TokenType.IDENTIFIER, None, "Expected identifier")
         while self.is_delim(','):
             self.advance()
+            self._last_id_list.append(self.current_token.value)
             self.expect(TokenType.IDENTIFIER, None, "Expected identifier after ','")
 
     def parse_operator(self):
@@ -658,6 +674,8 @@ class SyntaxAnalyzer:
         self.expect(TokenType.DELIMITER, ']')
 
     def parse_assignment(self):
+        var_name = self.current_token.value
+        self._check_declared(var_name)
         self.expect(TokenType.IDENTIFIER)
         self.expect(TokenType.KEYWORD, 'as')
         self.parse_expression()
@@ -689,6 +707,11 @@ class SyntaxAnalyzer:
         self.expect(TokenType.KEYWORD, 'read')
         self.expect(TokenType.DELIMITER, '(')
         self.parse_id_list()
+        # Проверка: все переменные в read должны быть описаны
+        for name in self._last_id_list:
+            if name not in self.declared_vars:
+                raise SemanticError(f"Неописанная переменная '{name}' в read", self.current_token.line,
+                                    self.current_token.col)
         self.expect(TokenType.DELIMITER, ')')
 
     def parse_write(self):
@@ -720,6 +743,7 @@ class SyntaxAnalyzer:
 
     def parse_factor(self):
         if self.is_identifier():
+            self._check_declared(self.current_token.value)
             self.advance()
         elif self.is_number():
             self.advance()
@@ -734,6 +758,10 @@ class SyntaxAnalyzer:
             self.expect(TokenType.DELIMITER, ')')
         else:
             raise SyntaxError("Expected factor (identifier, number, true/false, not, or '(')", self.current_token.line, self.current_token.col)
+
+    def _check_declared(self, var_name: str):
+        if var_name not in self.declared_vars:
+            raise SemanticError(f"Неописанная переменная '{var_name}'", self.current_token.line, self.current_token.col)
 def main():
     if len(sys.argv) < 2:
         print("Usage: python lexer.py <input_file>")
@@ -746,12 +774,13 @@ def main():
     lexer.print_operation_table()
 
     # === СИНТАКСИЧЕСКИЙ АНАЛИЗ ===
+    # === СИНТАКСИЧЕСКИЙ И СЕМАНТИЧЕСКИЙ АНАЛИЗ ===
     try:
-        parser = SyntaxAnalyzer(lexer.tokens)
+        parser = SyntaxAnalyzer(lexer.tokens, lexer.identifiers)
         parser.parse_program()
-        print("\n Синтаксический анализ успешно завершён!")
-    except SyntaxError as e:
-        print(f"\n СИНТАКТИЧЕСКАЯ ОШИБКА: {e}")
+        print("\n Синтаксический и семантический анализ успешно завершены!")
+    except (SyntaxError, SemanticError) as e:
+        print(f"\n ОШИБКА: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
